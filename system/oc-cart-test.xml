@@ -1,0 +1,480 @@
+<modification>
+	<code>oc-cart-test</code>
+	<name>Cart Test</name>
+	<version>1.0</version>
+	<author>Tumkiv Roman</author>
+    
+	<file path="admin/model/catalog/product.php">
+		<operation>
+			<search><![CDATA[if (isset($data['product_recurring'])) {]]></search>
+			<add position="before"><![CDATA[
+		/* oc-cart-test - begin */
+		$this->addOptionCombination($product_id, $data);
+		/* oc-cart-test - end */
+	]]></add>
+		</operation>
+
+		<operation>
+			<search><![CDATA[public function editProduct]]></search>
+			<add position="before"><![CDATA[
+/* oc-cart-test - begin */
+	public function addOptionCombination($product_id, $data){
+
+		function createCombination($arrays) {
+			$result = array();
+			$keys = array_keys($arrays);
+			$reverse_keys = array_reverse($keys);
+			$size = intval(count($arrays) > 0);
+			foreach ($arrays as $array) {
+				$size *= count($array);
+			}
+			for ($i = 0; $i < $size; $i ++) {
+				$result[$i] = array();
+				foreach ($keys as $j) {
+					$result[$i][$j] = current($arrays[$j]);
+				}
+				foreach ($reverse_keys as $j) {
+					if (next($arrays[$j])) {
+						break;
+					}
+					elseif (isset ($arrays[$j])) {
+						reset($arrays[$j]);
+					}
+				}
+			}
+			return $result;
+		}
+
+		$option_type = ['select', 'radio', 'checkbox', 'image'];
+		$option_combination = [];
+		$option_value_data = [];
+
+		if (isset($data['product_option'])) {
+			foreach ($data['product_option'] as $product_option) {
+				if (in_array($product_option['type'], $option_type)) {
+
+					if (isset($product_option['product_option_value'])) {
+						$option_value = [];
+						foreach ($product_option['product_option_value'] as $product_option_value) {
+							$option_value[] = $product_option['option_id'] . ":" . $product_option_value['option_value_id'];
+							if(!isset($option_value_data[$product_option['option_id']]))
+								$option_value_data[$product_option['option_id']] = [];
+							$option_value_data[$product_option['option_id']][$product_option_value['option_value_id']] = ['price_prefix'=> $product_option_value['price_prefix'], 'price' => $product_option_value['price']];
+						}
+						$option_combination[] = $option_value;
+					}
+				}
+			}
+		}
+
+		$combinations = [];
+		$exist_combinations_key = [];
+		$combinations_arr = createCombination($option_combination);
+
+		$exist_combinations = $this->db->query("SELECT * FROM " . DB_PREFIX . "product_option_combination WHERE product_id = " . $product_id);
+		$this->db->query("DELETE FROM " . DB_PREFIX . "product_option_combination WHERE product_id = '" . (int)$product_id . "'");
+
+		foreach ($exist_combinations->rows as $row){
+			$exist_combinations_key[$row['combination']] = $row;
+		}
+
+		foreach ($combinations_arr as $combination){
+			$combination_str = implode('-', $combination);
+
+			// set random quantity - for testing purpose
+			if(isset($exist_combinations_key[$combination_str])){
+				$quanity = $exist_combinations_key[$combination_str]['quantity'];
+			}else{
+				$quanity = random_int(1,8);
+			}
+
+			// get price from option combination
+			$option_price = 0;
+			foreach($combination as $comb){
+				$opt_val_arr = explode(":", $comb);
+				$opt_price = $option_value_data[$opt_val_arr[0]][$opt_val_arr[1]]['price'];
+				$price_prefix = $option_value_data[$opt_val_arr[0]][$opt_val_arr[1]]['price_prefix'];
+
+				if ($price_prefix == '+') {
+					$option_price += $opt_price;
+				} elseif ($price_prefix == '-') {
+					$option_price -= $opt_price;
+				}
+			}
+			$price = $data['price'] + $option_price;
+
+			$combinations[] = "(" . $product_id . ", '" . implode('-', $combination) . "'," . $quanity . "," . $price . ")";
+		}
+
+		$this->db->query("INSERT INTO " . DB_PREFIX . "product_option_combination (product_id, combination, quantity, price) VALUES " . implode(",", $combinations));
+	}
+	/* oc-cart-test - end */
+				]]></add>
+		</operation>
+	</file>
+
+	<file path="catalog/model/catalog/product.php">
+		<operation>
+			<search><![CDATA[public function getProduct]]></search>
+			<add position="before"><![CDATA[
+	/* oc-cart-test - begin */
+	public function getAllOptions()
+	{
+		/*
+		$options = $this->cache->get('product.combination.all.options.' . (int)$this->config->get('config_language_id'));
+		if ($options)
+			return $options;*/
+
+		$sql = "SELECT * FROM `" . DB_PREFIX . "option` o LEFT JOIN " . DB_PREFIX . "option_description od ON (o.option_id = od.option_id) WHERE od.language_id = '" . (int)$this->config->get('config_language_id') . "'";
+
+		$raw_options = ($this->db->query($sql))->rows;
+
+		$options = [];
+		foreach ($raw_options as $option) {
+			$options[$option['option_id']] = $option;
+
+			$option_values = $this->getAllOptionValues($option['option_id']);
+			$options[$option['option_id']]['values'] = [];
+			foreach ($option_values as $option_value) {
+				$options[$option['option_id']]['values'][$option_value['option_value_id']] = $option_value;
+			}
+		}
+
+		//$this->cache->set('product.combination.all.options', $options);
+
+		return $options;
+	}
+
+	private function getAllOptionValues($option_id)
+	{
+		$option_value_data = array();
+
+		$option_value_query = $this->db->query("SELECT * FROM " . DB_PREFIX . "option_value ov LEFT JOIN " . DB_PREFIX . "option_value_description ovd ON (ov.option_value_id = ovd.option_value_id) WHERE ov.option_id = '" . (int)$option_id . "' AND ovd.language_id = '" . (int)$this->config->get('config_language_id') . "' ORDER BY ov.sort_order, ovd.name");
+
+		foreach ($option_value_query->rows as $option_value) {
+			$option_value_data[] = array(
+				'option_value_id' => $option_value['option_value_id'],
+				'name' => $option_value['name'],
+				'image' => $option_value['image'],
+				'sort_order' => $option_value['sort_order']
+			);
+		}
+
+		return $option_value_data;
+	}
+
+	public function getOptionCombinations($product_id, $data = [])
+	{
+		$options = $this->getAllOptions();
+		$combinations = ($this->db->query("SELECT * FROM " . DB_PREFIX . "product_option_combination WHERE product_id = " . (int)$product_id))->rows;
+		$combinations = $this->normalizeCombinations($combinations, $options);
+
+		$total = count($combinations);
+		$quantities = array_unique(array_map(function($elem){return $elem['quantity'];}, $combinations));
+		$prices = array_unique(array_map(function($elem){return $elem['price'];}, $combinations));
+
+		$comb_response = $this->applyFiltersSortPagination($combinations, $data);
+
+		return [
+			'combinations' => $comb_response[0],
+			'total' => $total,
+			'quantities' => $quantities,
+			'prices' => $prices,
+			'filtered' => $comb_response[1]
+		];
+	}
+
+	private function normalizeCombinations($combinations, $options)
+	{
+		$normal_combination = [];
+
+		$getNormalComb = function ($combination, $options) {
+			$combination = explode("-", $combination);
+			$normal_comb = [];
+			foreach ($combination as $comb) {
+				$comb = explode(":", $comb);
+				$option_id = $comb[0];
+				$option_value_id = $comb[1];
+
+				$normal_comb[$option_id] = [$option_value_id => [
+					'name' => $options[$option_id]["values"][$option_value_id]['name']
+				]];
+			}
+			return $normal_comb;
+		};
+
+		foreach ($combinations as $combination) {
+			$normal_combination[] = [
+				"quantity" => $combination['quantity'],
+				"price" => $combination['price'],
+				"comb" => $getNormalComb($combination['combination'], $options)
+			];
+		}
+		//echo "<pre>"; print_r($normal_combination); echo "</pre></br>";
+		return $normal_combination;
+	}
+
+	private function applyFiltersSortPagination($combinations, $data)
+	{
+		$data = array_merge([
+			'filter' => [],//"option_id:option_value_id, ..."
+			'sort' => [], //"options" => [13, "asc"]
+			'page' => 0,
+			'limit' => 10
+		], $data);
+
+
+		//echo " <pre>"; print_r($data); echo "</pre></br>";exit;
+
+		$filters = [
+			"options" => function ($filter_data) use (&$combinations) {
+				foreach ($combinations as $index => $combination) {
+					foreach ($filter_data as $filter) {
+						if (!isset($combination['comb'][$filter[0]][$filter[1]])){
+							unset($combinations[$index]);
+						}
+					}
+				}
+			},
+			"price" => function ($filter_data) use (&$combinations) {
+				foreach ($combinations as $index => $combination) {
+					$found = false;
+					if ($filter_data[0] == $combination['price'])
+						$found = true;
+					if (!$found)
+						unset($combinations[$index]);
+				}
+			},
+			"quantity" => function ($filter_data) use (&$combinations) {
+				foreach ($combinations as $index => $combination) {
+					$found = false;
+					if ($filter_data[0] == $combination['quantity'])
+						$found = true;
+					if (!$found)
+						unset($combinations[$index]);
+				}
+			}
+		];
+
+		$sorts = [
+			"options" => function ($sort_data) use (&$combinations) {
+				usort($combinations, function($a, $b) use ($sort_data) {
+					$result = strcmp(reset($a['comb'][$sort_data[0]])["name"], reset($b['comb'][$sort_data[0]])["name"]);
+					return $sort_data[1] != "asc" ? $result : $result*-1;
+				});
+			},
+			"price" => function ($sort_data) use (&$combinations) {
+				usort($combinations, function($a, $b) use ($sort_data) {
+					$result = ($a['price'] >= $b['price']) ? -1 : 1;
+					return $sort_data[0] != "asc" ? $result : $result*-1;
+				});
+			},
+			"quantity" => function ($sort_data) use (&$combinations) {
+				usort($combinations, function($a, $b) use ($sort_data) {
+					$result = ($a['quantity'] >= $b['quantity']) ? -1 : 1;
+					return $sort_data[0] != "asc" ? $result : $result*-1;
+				});
+			}
+		];
+
+		foreach ($data['filter'] as $name => $value) {
+			if (isset($filters[$name]) and $value !== null) {
+				$filters[$name]($value);
+			}
+		}
+
+		foreach ($data['sort'] as $name => $value) {
+			if (isset($sorts[$name]) and $value !== null) {
+				$sorts[$name]($value);
+			}
+		}
+
+
+
+		return [array_slice($combinations, $data['page']*$data['limit'], $data['limit']), count($combinations)];
+	}
+	/* oc-cart-test - end */
+	]]></add>
+		</operation>
+	</file>
+
+	<file path="catalog/controller/product/product.php">
+		<operation>
+			<search><![CDATA[if ($product_info['minimum']) {]]></search>
+			<add position="before"><![CDATA[
+			/* oc-cart-test - begin */
+			$data['combination_options'] = $this->model_catalog_product->getAllOptions();
+			$data['combination_options_filters'] = $this->adaptOptionsForFilters($data['combination_options'], $product_id);
+			//echo "<pre>"; print_r($data['combination_options']);
+			/* oc-cart-test - end */
+	]]></add>
+		</operation>
+		<operation>
+			<search><![CDATA[public function review()]]></search>
+			<add position="before"><![CDATA[
+	/* oc-cart-test - begin */
+	public function getCombinations(){
+		$product_id = $this->request->get['product_id'];
+		$data = $this->initFilterOrderPaginationombination();
+
+		$this->load->model('catalog/product');
+		$combinations = $this->model_catalog_product->getOptionCombinations($product_id, $data);
+		$json = $this->adaptCombinationsToDataTables($combinations);
+
+
+		//echo count($combinations) . " <pre>"; print_r($options); echo "</pre></br>";
+		//echo " <pre>"; print_r($combinations); echo "</pre></br>";
+		//return ["options" => $options, "combinations" => $combinations];
+
+		//$this->response->addHeader('Content-Type: application/json');
+		$this->response->setOutput(json_encode($json));
+	}
+
+	private function initFilterOrderPaginationombination(){
+		$this->load->model('catalog/product');
+		$options = array_values($this->model_catalog_product->getAllOptions());
+
+		//order
+		$column = $this->request->get['order'][0]['column'];
+		$direction = $this->request->get['order'][0]['dir'];
+
+		$data = [
+			'filter' => [],//"options" => [[11, 48]], "price" => [91,110]
+			'page' => $this->request->get['start'],
+			'limit' => $this->request->get['length']
+		];
+
+		if($column < count($options)){
+			$order = strtolower($options[$column]['option_id']);
+			$data['sort'] = ["options" => [$order, $direction]];
+		}elseif($column == 6){
+			$data['sort'] = ["quantity" => [$direction]];
+		}elseif ($column == 5){
+			$data['sort'] = ["price" => [$direction]];
+		}
+
+		//filter
+		$columns = $this->request->get['columns'];
+		$options = [];
+		foreach ($columns as $column){
+			if($column['search']['value']){
+				$val_data = explode("_", $column['search']['value']);
+				if($val_data[0] == 'options')
+					$options[] = explode(":", str_replace("\\", "", $val_data[1]));
+				elseif($val_data[0] == 'quantity')
+					$data['filter']["quantity"] = [str_replace("\\", "", $val_data[1])];
+				elseif($val_data[0] == 'price')
+					$data['filter']["price"] = [str_replace("\\", "", $val_data[1])];
+			}
+		}
+		if(count($options))
+			$data['filter']["options"] = $options;
+
+		//echo " <pre>"; print_r($data); echo "</pre></br>";
+		return $data;
+	}
+
+	private function adaptCombinationsToDataTables($combinations){
+		$this->load->model('catalog/product');
+		$options = $this->model_catalog_product->getAllOptions();
+
+		$data = array(
+			"draw" => $this->request->get['draw'],
+			"recordsTotal" => $combinations['total'],
+			"recordsFiltered" => $combinations['filtered']
+		);
+
+		$result = [];
+		foreach ($combinations['combinations'] as $combination){
+			$row = [];
+			foreach ($options as $option_id => $option_data){
+				$row[] = reset($combination['comb'][$option_id])['name'];
+			}
+			$row[] = $combination['price'];
+			$row[] = $combination['quantity'];
+			$row[] = $combination['comb'];
+			$result[] = $row;
+		}
+		$data['data'] = $result;
+		//echo " <pre>"; print_r($combination['comb']); echo "</pre></br>";
+		return $data;
+	}
+
+	private function adaptOptionsForFilters($options, $product_id){
+		$this->load->model('catalog/product');
+		$combinations = $this->model_catalog_product->getOptionCombinations($product_id);
+
+
+		$result = [];
+		foreach($options as $option){
+			$values = [];
+			foreach($option['values'] as $value){
+				$values[] = [
+					'value' => 'options_' . $option["option_id"] . ":" . $value["option_value_id"],
+					'name' => $value['name']
+				];
+			}
+			$result[] = $values;
+
+		}
+
+		$prices = [];
+		foreach($combinations['prices'] as $price){
+			$prices[] = [
+				'value' => 'price_' . $price,
+				'name' => $price
+			];
+		}
+		$result[] = $prices;
+
+		$quantities = [];
+		foreach($combinations['quantities'] as $quantity){
+			$quantities[] = [
+				'value' => 'quantity_' . $quantity,
+				'name' => $quantity
+			];
+		}
+		$result[] = $quantities;
+
+		return json_encode($result);
+	}
+	/* oc-cart-test - end*/
+		]]></add>
+		</operation>
+	</file>
+
+	<file path="catalog/view/theme/default/template/product/product.twig">
+		<operation>
+			<search><![CDATA[{% if products %}]]></search>
+			<add position="before"><![CDATA[
+
+]]></add>
+		</operation>
+	</file>
+
+	<file path="catalog/language/en-gb/product/product.php">
+		<operation>
+			<search><![CDATA[$_['text_year']                = 'year';]]></search>
+			<add position="after"><![CDATA[
+/* oc-cart-test - begin */
+$_['text_comb_quantity']            = 'Quantity';
+$_['text_comb_price']               = 'Price';
+$_['text_comb_order']               = 'Order';
+/* oc-cart-test - end */
+				]]></add>
+		</operation>
+	</file>
+
+	<file path="catalog/language/ru-ru/product/product.php">
+		<operation>
+			<search><![CDATA[$_['text_benefits']     = 'Преимущества:';]]></search>
+			<add position="after"><![CDATA[
+/* oc-cart-test - begin */
+$_['text_comb_quantity']            = 'Количество';
+$_['text_comb_price']               = 'Цена';
+$_['text_comb_order']               = 'Заказ';
+/* oc-cart-test - end */
+				]]></add>
+		</operation>
+	</file>
+</modification>
